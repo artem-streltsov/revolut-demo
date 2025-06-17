@@ -4,7 +4,10 @@ A FastAPI application that handles Revolut webhooks using ngrok for local develo
 
 ## Setup
 
-1. Install ngrok: `https://ngrok.com/download`
+1. Install ngrok:
+   ```bash
+   brew install ngrok
+   ```
 
 2. Add your ngrok auth token:
    ```bash
@@ -15,7 +18,11 @@ A FastAPI application that handles Revolut webhooks using ngrok for local develo
 
 4. Run the application:
    ```bash
-   python main.py
+   brew install uv
+   uv venv
+   source .venv/bin/activate
+   uv sync
+   uv run main.py
    ```
 
 The ngrok dashboard will be available at: http://localhost:4040
