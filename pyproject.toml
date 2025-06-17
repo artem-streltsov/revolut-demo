@@ -1,0 +1,13 @@
+[project]
+name = "revolut"
+version = "0.1.0"
+description = "Revolut Order Creation API Client"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "requests>=2.31.0",
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
+    "pyngrok>=7.0.0",
+    "black>=25.1.0",
+]
