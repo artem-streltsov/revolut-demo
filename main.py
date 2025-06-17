@@ -6,6 +6,8 @@ import uvicorn
 from pyngrok import ngrok
 from typing import Dict, Any
 from datetime import datetime, timezone
+import hmac
+import hashlib
 
 app = FastAPI(title="Revolut Webhook Handler")
 
@@ -55,6 +57,7 @@ class RevolutWebhookManager:
         self.secret = os.getenv("REVOLUT_SECRET")
         self.base_url = os.getenv("REVOLUT_BASE_URL")
         self.api_version = os.getenv("REVOLUT_API_VERSION")
+        self.webhook_signing_secret = None
 
         if not all([self.api_key, self.secret, self.base_url, self.api_version]):
             raise ValueError("Missing required environment variables")
@@ -87,6 +90,52 @@ class RevolutWebhookManager:
         except (ValueError, TypeError) as e:
             print(f"WEBHOOK REJECTED: Invalid timestamp format: {timestamp_header}")
             raise HTTPException(status_code=400, detail="Invalid timestamp format")
+
+    def validate_signature(
+        self, signature_header: str, timestamp_header: str, raw_payload: str
+    ) -> bool:
+        if not signature_header:
+            print("WEBHOOK REJECTED: Missing revolut-signature header")
+            raise HTTPException(status_code=400, detail="Missing signature header")
+
+        if not self.webhook_signing_secret:
+            print("WEBHOOK REJECTED: No webhook signing secret available")
+            raise HTTPException(
+                status_code=500, detail="Missing webhook signing secret"
+            )
+
+        try:
+            # Format: v1.{timestamp}.{raw_payload_without_whitespaces}
+            payload_to_sign = f"v1.{timestamp_header}.{raw_payload}"
+            print(f"Payload to sign: {payload_to_sign}")
+
+            # HMAC-SHA256 with the signing secret as key
+            expected_signature = (
+                "v1="
+                + hmac.new(
+                    bytes(self.webhook_signing_secret, "utf-8"),
+                    msg=bytes(payload_to_sign, "utf-8"),
+                    digestmod=hashlib.sha256,
+                ).hexdigest()
+            )
+
+            print(f"Expected signature: {expected_signature}")
+            print(f"Received signature: {signature_header}")
+
+            # Revolut may send multiple signatures separated by commas
+            received_signatures = [sig.strip() for sig in signature_header.split(",")]
+
+            for received_sig in received_signatures:
+                if hmac.compare_digest(expected_signature, received_sig):
+                    print("Signature validation: PASSED")
+                    return True
+
+            print("WEBHOOK REJECTED: Signature validation failed")
+            raise HTTPException(status_code=400, detail="Invalid signature")
+
+        except Exception as e:
+            print(f"WEBHOOK REJECTED: Signature validation error: {str(e)}")
+            raise HTTPException(status_code=400, detail="Signature validation failed")
 
     def get_webhook_list(self):
         url = f"{self.base_url}/api/1.0/webhooks"
@@ -148,34 +197,53 @@ class RevolutWebhookManager:
         try:
             response = requests.post(url, headers=headers, json=payload)
             print(f"Webhook setup: {response.status_code} - {response.text}")
-            return (
-                response.json()
-                if response.status_code == 200
-                else {"error": response.text}
-            )
+
+            if response.status_code == 200:
+                result = response.json()
+                if "signing_secret" in result:
+                    self.webhook_signing_secret = result["signing_secret"]
+                    print(
+                        f"Webhook signing secret captured: {self.webhook_signing_secret[:10]}..."
+                    )
+                return result
+            else:
+                return {"error": response.text}
         except Exception as e:
             print(f"Webhook setup failed: {str(e)}")
             return {"error": str(e)}
 
-    def process_webhook(self, headers_dict: dict, payload: dict):
+    def process_webhook(self, headers_dict: dict, payload: dict, raw_payload: str):
         print(f"\nWEBHOOK HEADERS:")
         print(f"{json.dumps(headers_dict, indent=2)}")
 
         timestamp_header = headers_dict.get("revolut-request-timestamp")
+        signature_header = headers_dict.get("revolut-signature")
+
         self.validate_timestamp(timestamp_header)
+        self.validate_signature(signature_header, timestamp_header, raw_payload)
 
         print(f"\nWEBHOOK PAYLOAD:")
         print(f"{json.dumps(payload, indent=2)}")
+
+
+global_webhook_manager = None
 
 
 @app.post("/webhook/revolut")
 async def handle_revolut_webhook(request: Request):
     try:
         headers_dict = dict(request.headers)
-        payload = await request.json()
 
-        webhook_manager = RevolutWebhookManager()
-        webhook_manager.process_webhook(headers_dict, payload)
+        raw_payload = await request.body()
+        raw_payload_str = raw_payload.decode("utf-8")
+        payload = json.loads(raw_payload_str)
+
+        if global_webhook_manager is None:
+            raise HTTPException(
+                status_code=500, detail="Webhook manager not initialized"
+            )
+
+        global_webhook_manager.process_webhook(headers_dict, payload, raw_payload_str)
 
         return {"status": 204}
     except json.JSONDecodeError:
@@ -199,6 +267,8 @@ def load_env():
 
 
 def run_demo():
+    global global_webhook_manager
+
     print("Starting Revolut Demo")
     load_env()
 
@@ -210,10 +280,10 @@ def run_demo():
         print(f"Webhook endpoint: {webhook_url}")
 
         order_client = RevolutOrderClient()
-        webhook_manager = RevolutWebhookManager()
+        global_webhook_manager = RevolutWebhookManager()
 
-        webhook_manager.delete_all_webhooks()
-        webhook_manager.setup_webhook(webhook_url)
+        global_webhook_manager.delete_all_webhooks()
+        global_webhook_manager.setup_webhook(webhook_url)
 
         orders = [{"amount": 1000, "currency": "GBP", "description": "£10.00 GBP"}]
         payment_urls = []
